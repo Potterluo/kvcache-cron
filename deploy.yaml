@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kvcache-cron
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-kvcache-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 127.0.0.1            # ★ 改为你的 NFS 服务器地址 (本机可填 127.0.0.1)
+    path: /srv/nfs/kvcache       # ★ 改为 NFS 导出路径
+    readOnly: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-kvcache-pvc
+  namespace: kvcache-cron
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""           # 静态绑定,禁用默认 storageClass
+  resources:
+    requests:
+      storage: 1Gi
+  volumeName: nfs-kvcache-pv
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kvcache-cron
+  namespace: kvcache-cron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kvcache-cron
+  template:
+    metadata:
+      labels:
+        app: kvcache-cron
+    spec:
+      containers:
+        - name: cron-nfs
+          # 生产 ARM64 用 my-cron-nfs:latest-arm64;本地 amd64 验证用 my-cron-nfs:amd64-test
+          image: my-cron-nfs:latest-arm64
+          imagePullPolicy: Never
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+            # === 多任务: 用 CRON_JOBS,每行一条完整 cron 表达式 (# 为注释) ===
+            # 不设置任何 CRON_* 时,默认每5分钟打印 hello world (无害)
+            - name: CRON_JOBS
+              value: |-
+                */5 * * * * echo hello from kvcache-cron
+                0 * * * * echo hourly heartbeat
+                # 取消注释以启用: 每天凌晨3点删除 /mnt/kvcache 下所有文件(保留文件夹)
+                # 0 3 * * * /usr/bin/find /mnt/kvcache -type f -delete
+            # === 或单任务(与 CRON_JOBS 二选一): ===
+            # - name: CRON_SCHEDULE
+            #   value: "0 3 * * *"
+            # - name: CRON_COMMAND
+            #   value: "/usr/bin/find /mnt/kvcache -type f -delete"
+          volumeMounts:
+            - name: kvcache
+              mountPath: /mnt/kvcache
+      volumes:
+        - name: kvcache
+          persistentVolumeClaim:
+            claimName: nfs-kvcache-pvc
