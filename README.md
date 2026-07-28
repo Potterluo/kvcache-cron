@@ -140,6 +140,39 @@ spec:
 
 ---
 
+## 方式 E：Sidecar 边车（Pod 内定时清理）
+
+> 当要清理的是**主容器 Pod 本地卷**（如 `emptyDir` 缓存）时，CronJob（独立 Pod）访问不到——只有**同 Pod 的边车**能清。典型场景：主容器是 vLLM 等服务，边车定时清它写的缓存。
+
+复用本镜像作边车：`crond` 在边车内常驻，按 env 调度；主容器与边车挂载**同一个卷**（`emptyDir` 或共享 `PVC`）。见仓库 `vllm-sidecar-cron.yaml`：
+
+```yaml
+spec:
+  containers:
+    - name: vllm                # 主容器
+      image: vllm/vllm-openai:latest
+      volumeMounts:
+        - {name: kvcache, mountPath: /mnt/kvcache}
+    - name: cleanup             # 边车: 定时清主容器写的缓存
+      image: my-cron-nfs:latest-arm64
+      env:
+        - {name: CRON_SCHEDULE, value: "0 3 * * *"}
+        - {name: CRON_COMMAND, value: "/usr/bin/find /mnt/kvcache -type f -delete"}
+      volumeMounts:
+        - {name: kvcache, mountPath: /mnt/kvcache}   # 共享同一卷
+  volumes:
+    - {name: kvcache, emptyDir: {}}    # 或 persistentVolumeClaim 共享
+```
+
+**验证记录**（k3s）：`writer`(模拟主容器写文件)+`cleanup`(边车) 共享 `emptyDir`，边车 cron 触发后删掉主容器写的 3 个文件，`sub` 文件夹保留 ✅
+
+> 三种调度方式怎么选？
+> - **CronJob**：要清理的是**集群/共享存储**（PV/PVC），且无需常驻 → 方式 D
+> - **Sidecar**：要清理的是**主容器 Pod 本地卷**（emptyDir），需与主容器同生命周期 → 方式 E
+> - **常驻 Deployment + crond**：主容器本身就需要常驻、且清理与它解耦 → 方式 A
+
+---
+
 ## cron 表达式说明
 
 镜像使用标准 **Vixie cron 5 段格式**（与系统 `crontab`、busybox crond 完全兼容）：
