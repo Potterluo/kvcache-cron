@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kvcache-cron
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-kvcache-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 127.0.0.1            # ★ 改为你的 NFS 服务器地址 (本机可填 127.0.0.1)
+    path: /srv/nfs/kvcache       # ★ 改为 NFS 导出路径
+    readOnly: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-kvcache-pvc
+  namespace: kvcache-cron
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""           # 静态绑定,禁用默认 storageClass
+  resources:
+    requests:
+      storage: 1Gi
+  volumeName: nfs-kvcache-pv
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kvcache-cron
+  namespace: kvcache-cron
+spec:
+  schedule: "0 3 * * *"          # ★ cron 表达式直接写这里: 每天 03:00
+  timeZone: Asia/Shanghai        # k8s 1.25+ 支持; 不支持则删除此行并靠节点时区
+  concurrencyPolicy: Forbid      # 上次未跑完则跳过本次,避免并发删同一目录
+  successfulJobsHistoryLimit: 3  # 保留 3 个成功 Job 记录
+  failedJobsHistoryLimit: 1      # 保留 1 个失败 Job 记录
+  startingDeadlineSeconds: 200   # 错过 200 秒内仍补跑
+  jobTemplate:
+    spec:
+      backoffLimit: 2            # 失败重试 2 次
+      activeDeadlineSeconds: 600 # 单次最长 10 分钟
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: alpine:latest # 生产 ARM64; 本地 amd64 验证用 my-cron-nfs:amd64-test
+              imagePullPolicy: Never
+              # 覆盖镜像 ENTRYPOINT,直接跑 find;调度由 k8s 负责,无需容器内 cron
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  n=$(find /mnt/kvcache -type f -print -delete | wc -l)
+                  echo "kvcache cleanup: deleted $n files at $(date)"
+              volumeMounts:
+                - name: kvcache
+                  mountPath: /mnt/kvcache
+          volumes:
+            - name: kvcache
+              persistentVolumeClaim:
+                claimName: nfs-kvcache-pvc
