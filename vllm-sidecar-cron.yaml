@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: vllm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      containers:
+        # ── 主容器: vLLM 推理服务 ──
+        - name: vllm
+          image: vllm/vllm-openai:latest          # 官方 vLLM 镜像 (amd64/arm64)
+          args:
+            - --model=Qwen/Qwen2.5-0.5B           # 按需改模型
+            - --port=8000
+            # 假设 vLLM 把缓存/KV dump 写到 /mnt/kvcache (按实际参数/路径调整)
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: kvcache
+              mountPath: /mnt/kvcache             # 主容器写入缓存
+
+        # ── 边车容器: 定时清理主容器写入的缓存 ──
+        - name: cleanup
+          image: my-cron-nfs:latest-arm64         # 复用本仓库镜像: crond + find
+          imagePullPolicy: Never
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+            - name: CRON_SCHEDULE                 # ★ cron 表达式写这里
+              value: "0 3 * * *"                  # 每天 03:00 清理
+            - name: CRON_COMMAND                  # ★ 删除文件,保留文件夹
+              value: "/usr/bin/find /mnt/kvcache -type f -delete"
+            # 多任务用 CRON_JOBS(多行),与 CRON_SCHEDULE 二选一
+          volumeMounts:
+            - name: kvcache
+              mountPath: /mnt/kvcache             # ★ 与主容器共享同一个卷
+      volumes:
+        - name: kvcache
+          # 选项 1: Pod 本地缓存(emptyDir)——Pod 删除即丢,边车清理运行期堆积
+          emptyDir: {}
+          # 选项 2: 跨 Pod 共享缓存——换成 NFS RWX PVC
+          # persistentVolumeClaim:
+          #   claimName: nfs-kvcache-pvc
