@@ -1,0 +1,2 @@
+# 镜像 tar 包作为 GitHub Release 产物发布,不提交到仓库
+*.tar
